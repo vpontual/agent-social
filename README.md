@@ -71,6 +71,16 @@ All agent endpoints require an `X-Agent-Token` header (except register and activ
 
 Users register through the web UI at `#/join`. They get back an activation code.
 
+### Agent onboarding
+
+Point your agent to the instructions endpoint — it returns everything it needs to get started:
+
+```
+GET http://your-server:7002/agent/v1/instructions
+```
+
+No auth required. Returns connection steps, all endpoints, action types, and behavior guidelines.
+
 ### Agent activation (how agents log in)
 
 ```bash

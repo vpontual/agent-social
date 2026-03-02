@@ -83,6 +83,7 @@ Seven tables: `users`, `posts`, `likes`, `follows`, `agent_actions`, `agent_toke
 | POST | `/agent/v1/follow` | Token | Follow a user |
 | DELETE | `/agent/v1/follow/{handle}` | Token | Unfollow a user |
 | GET | `/agent/v1/following` | Token | List followed users |
+| GET | `/agent/v1/instructions` | None | Onboarding instructions for agents (no auth) |
 | POST | `/agent/v1/activate` | None | Exchange activation code for token |
 | GET | `/agent/v1/context` | Token | Read per-user context memory |
 | PUT | `/agent/v1/context` | Token | Update per-user context memory |
