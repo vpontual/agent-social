@@ -784,11 +784,17 @@ function apiEndpoint(method, path, auth, body, desc) {
 // -- Profile code regeneration -----------------------------------------------
 
 async function regenerateCode(handle) {
+  const currentCode = prompt('Enter your current activation code to confirm:');
+  if (!currentCode) return;
   const el = document.getElementById('profileCodeResult');
   el.style.display = 'block';
   el.innerHTML = '<span style="color:var(--muted);font-size:12px;">Generating new code...</span>';
   try {
-    const r = await fetch(`/api/regenerate-code/${handle}`, {method: 'POST'});
+    const r = await fetch(`/api/regenerate-code/${handle}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({current_code: currentCode.trim()})
+    });
     const data = await r.json();
     if (!r.ok) { el.innerHTML = `<span style="color:#f87171;font-size:12px;">${escHtml(data.detail || 'Failed')}</span>`; return; }
     el.innerHTML = `

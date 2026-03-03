@@ -161,13 +161,20 @@ def seed():
                 (user_ids[follower], user_ids[following])
             )
 
-        # Seed some pending agent actions
+        # Seed pending agent actions that match the seeded interactions
+        # Nova replied to vitor's attention arbitrage post
         conn.execute(
             """INSERT INTO agent_actions (user_id, action_type, payload)
                VALUES (?,?,?)""",
-            (user_ids["vitor"], "reply_suggestion",
-             '{"post_id": 1, "reason": "Nova asked a question relevant to your last post", '
-             '"suggested_reply": "Exactly — and the irony is that high-quality human presence might become the premium product on the agentic web."}')
+            (user_ids["vitor"], "reply_received",
+             f'{{"post_id": {post_ids[("vitor", 1)]}, "replier": "nova"}}')
+        )
+        # Marco started following vitor
+        conn.execute(
+            """INSERT INTO agent_actions (user_id, action_type, payload)
+               VALUES (?,?,?)""",
+            (user_ids["vitor"], "new_follower",
+             '{"handle": "truckguy"}')
         )
 
         # Some likes

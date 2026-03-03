@@ -89,8 +89,11 @@ def resolve_agent(token: Optional[str]) -> sqlite3.Row:
 # ── Action generation helper ──────────────────────────────────────────────────
 
 def _create_actions_for_post(conn, post_id: int, author_id: int, content: str, parent_id: int | None):
-    """Generate agent_actions for replies, mentions, likes, follows."""
-    # On reply -> reply_received action for parent post's author
+    """Generate agent_actions for replies and mentions. Payloads use handles, not IDs."""
+    import json as _json
+    author = conn.execute("SELECT handle FROM users WHERE id = ?", (author_id,)).fetchone()
+    author_handle = author["handle"] if author else "unknown"
+
     if parent_id:
         parent = conn.execute(
             "SELECT user_id FROM posts WHERE id = ?", (parent_id,)
@@ -99,10 +102,9 @@ def _create_actions_for_post(conn, post_id: int, author_id: int, content: str, p
             conn.execute(
                 "INSERT INTO agent_actions (user_id, action_type, payload) VALUES (?,?,?)",
                 (parent["user_id"], "reply_received",
-                 f'{{"post_id": {parent_id}, "reply_id": {post_id}, "replier_id": {author_id}}}')
+                 _json.dumps({"post_id": parent_id, "replier": author_handle}))
             )
 
-    # On @mention -> mention action for mentioned user
     mentions = re.findall(r"@(\w+)", content)
     for handle in set(mentions):
         mentioned = conn.execute(
@@ -112,18 +114,21 @@ def _create_actions_for_post(conn, post_id: int, author_id: int, content: str, p
             conn.execute(
                 "INSERT INTO agent_actions (user_id, action_type, payload) VALUES (?,?,?)",
                 (mentioned["id"], "mention",
-                 f'{{"post_id": {post_id}, "mentioner_id": {author_id}}}')
+                 _json.dumps({"post_id": post_id, "from": author_handle}))
             )
 
 
 def _create_like_action(conn, post_id: int, liker_id: int):
     """Generate like_received action for post author."""
+    import json as _json
     post = conn.execute("SELECT user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
     if post and post["user_id"] != liker_id:
+        liker = conn.execute("SELECT handle FROM users WHERE id = ?", (liker_id,)).fetchone()
+        liker_handle = liker["handle"] if liker else "unknown"
         conn.execute(
             "INSERT INTO agent_actions (user_id, action_type, payload) VALUES (?,?,?)",
             (post["user_id"], "like_received",
-             f'{{"post_id": {post_id}, "liker_id": {liker_id}}}')
+             _json.dumps({"post_id": post_id, "from": liker_handle}))
         )
 
 
@@ -163,10 +168,13 @@ def _append_context(conn, user_id: int, entry: str):
 
 def _create_follow_action(conn, follower_id: int, followed_id: int):
     """Generate new_follower action for followed user."""
+    import json as _json
+    follower = conn.execute("SELECT handle FROM users WHERE id = ?", (follower_id,)).fetchone()
+    follower_handle = follower["handle"] if follower else "unknown"
     conn.execute(
         "INSERT INTO agent_actions (user_id, action_type, payload) VALUES (?,?,?)",
         (followed_id, "new_follower",
-         f'{{"follower_id": {follower_id}}}')
+         _json.dumps({"handle": follower_handle}))
     )
 
 
@@ -228,7 +236,11 @@ def get_post(post_id: int):
 @app.get("/api/user/{handle}")
 def get_user(handle: str):
     with get_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE handle = ?", (handle,)).fetchone()
+        user = conn.execute("""
+            SELECT id, handle, display_name, bio, avatar_prompt, header_prompt,
+                   agent_persona, agent_active, created_at
+            FROM users WHERE handle = ?
+        """, (handle,)).fetchone()
         if not user:
             raise HTTPException(404, "User not found")
         uid = user["id"]
@@ -323,7 +335,7 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
 
     with get_conn() as conn:
         pending = conn.execute("""
-            SELECT * FROM agent_actions
+            SELECT id, action_type, payload, created_at FROM agent_actions
             WHERE user_id = ? AND status = 'pending'
             ORDER BY created_at ASC LIMIT 20
         """, (uid,)).fetchall()
@@ -336,7 +348,7 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
         """, (uid,)).fetchall()
 
         recent_posts = conn.execute("""
-            SELECT id, content, created_at, posted_by FROM posts
+            SELECT id, content, created_at FROM posts
             WHERE user_id = ? ORDER BY created_at DESC LIMIT 5
         """, (uid,)).fetchall()
 
@@ -358,7 +370,6 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
 
     return {
         "user": {
-            "id": uid,
             "handle": user["handle"],
             "display_name": user["display_name"],
             "persona": user["agent_persona"],
@@ -439,7 +450,7 @@ def agent_reply(body: ReplyBody, x_agent_token: Optional[str] = Header(None)):
         target = f"@{parent_author['handle']}" if parent_author else f"post #{body.post_id}"
         _append_context(conn, user["id"], f"Replied to {target}: {body.content[:100]}")
 
-    return {"status": "replied", "reply_id": reply_id, "parent_id": body.post_id}
+    return {"status": "replied", "post_id": body.post_id}
 
 
 @app.post("/agent/v1/like")
@@ -490,7 +501,7 @@ def dismiss_pending(action_id: int, x_agent_token: Optional[str] = Header(None))
         )
         if cur.rowcount == 0:
             raise HTTPException(404, "Action not found")
-    return {"status": "dismissed", "action_id": action_id}
+    return {"status": "dismissed"}
 
 
 @app.get("/agent/v1/feed")
@@ -506,7 +517,7 @@ def agent_feed(
     with get_conn() as conn:
         if following:
             rows = conn.execute("""
-                SELECT p.id, p.content, p.created_at, p.source_url, p.posted_by,
+                SELECT p.id, p.content, p.created_at, p.source_url,
                        u.handle, u.display_name,
                        COALESCE(lc.cnt, 0) AS likes,
                        COALESCE(rc.cnt, 0) AS replies
@@ -520,7 +531,7 @@ def agent_feed(
             """, (uid, limit)).fetchall()
         else:
             rows = conn.execute("""
-                SELECT p.id, p.content, p.created_at, p.source_url, p.posted_by,
+                SELECT p.id, p.content, p.created_at, p.source_url,
                        u.handle, u.display_name,
                        COALESCE(lc.cnt, 0) AS likes,
                        COALESCE(rc.cnt, 0) AS replies
@@ -581,7 +592,7 @@ def agent_get_post(post_id: int, x_agent_token: Optional[str] = Header(None)):
 
     with get_conn() as conn:
         post = conn.execute("""
-            SELECT p.id, p.content, p.created_at, p.source_url, p.posted_by,
+            SELECT p.id, p.content, p.created_at, p.source_url,
                    u.handle, u.display_name,
                    COALESCE(lc.cnt, 0) AS likes
             FROM posts p
@@ -592,7 +603,7 @@ def agent_get_post(post_id: int, x_agent_token: Optional[str] = Header(None)):
         if not post:
             raise HTTPException(404, "Post not found")
         replies = conn.execute("""
-            SELECT p.id, p.content, p.created_at, p.posted_by,
+            SELECT p.id, p.content, p.created_at,
                    u.handle, u.display_name,
                    COALESCE(lc.cnt, 0) AS likes
             FROM posts p
@@ -682,7 +693,7 @@ def agent_following(x_agent_token: Optional[str] = Header(None)):
 
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT u.id, u.handle, u.display_name, u.bio
+            SELECT u.handle, u.display_name, u.bio
             FROM follows f JOIN users u ON u.id = f.following_id
             WHERE f.follower_id = ?
             ORDER BY f.created_at DESC
@@ -724,15 +735,24 @@ def human_register(body: RegisterBody):
     }
 
 
+class RegenerateCodeBody(BaseModel):
+    current_code: str
+
+
 @app.post("/api/regenerate-code/{handle}")
-def regenerate_code(handle: str):
-    """Generate a new activation code. Invalidates the old code and all existing agent tokens."""
+def regenerate_code(handle: str, body: RegenerateCodeBody):
+    """Generate a new activation code. Requires current code as proof of ownership.
+    Invalidates the old code and all existing agent tokens."""
     from db import make_activation_code
 
     with get_conn() as conn:
-        user = conn.execute("SELECT id FROM users WHERE handle = ?", (handle,)).fetchone()
+        user = conn.execute(
+            "SELECT id, activation_code FROM users WHERE handle = ?", (handle,)
+        ).fetchone()
         if not user:
             raise HTTPException(404, "User not found")
+        if user["activation_code"] != body.current_code:
+            raise HTTPException(403, "Invalid activation code")
         code = make_activation_code()
         conn.execute("UPDATE users SET activation_code = ? WHERE id = ?", (code, user["id"]))
         # Invalidate all existing agent tokens
@@ -1091,7 +1111,6 @@ def agent_instructions(request: Request):
             "mention": "Someone @mentioned the user. Read the post and consider responding.",
             "like_received": "Someone liked the user's post. No response needed, but you can engage.",
             "new_follower": "Someone followed the user. Consider following them back.",
-            "reply_suggestion": "A suggested reply the user might want to post. Review and post if appropriate.",
         },
         "behavior_guidelines": [
             "You represent a real person. Stay in character according to their persona and context memory.",

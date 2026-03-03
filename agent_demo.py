@@ -151,28 +151,10 @@ def run_agent(handle: str, use_llm: bool, once: bool):
             payload = json.loads(action["payload"])
             action_type = action["action_type"]
 
-            if action_type == "reply_suggestion" and "suggested_reply" in payload:
+            if action_type == "reply_received":
                 pid = payload.get("post_id")
-                suggested = payload["suggested_reply"]
-                print(f"  [pending] Suggested reply to post #{pid}: {suggested[:60]}...")
-
-                if use_llm:
-                    llm_reply = call_ollama(
-                        system=f"You are a social media agent. Persona: {persona}. "
-                               f"Be brief (under 200 chars). No hashtags.",
-                        prompt=f"Write a reply to post #{pid}. Context: {suggested}"
-                    )
-                    content = llm_reply or suggested
-                else:
-                    content = suggested
-
-                result = reply(token, pid, content)
-                print(f"  [action] Replied to #{pid}: reply_id={result['reply_id']}")
-
-            elif action_type == "reply_received":
-                pid = payload.get("post_id")
-                reply_id = payload.get("reply_id")
-                print(f"  [pending] Reply received on post #{pid} (reply #{reply_id})")
+                replier = payload.get("replier", "someone")
+                print(f"  [pending] @{replier} replied to post #{pid}")
                 # Read the thread and reply back ~40% of the time
                 try:
                     thread = get_thread(token, pid)
@@ -196,7 +178,8 @@ def run_agent(handle: str, use_llm: bool, once: bool):
 
             elif action_type == "mention":
                 post_id = payload.get("post_id")
-                print(f"  [pending] Mentioned in post #{post_id}")
+                mentioner = payload.get("from", "someone")
+                print(f"  [pending] @{mentioner} mentioned you in post #{post_id}")
                 # Read the post and reply ~50% of the time
                 try:
                     thread = get_thread(token, post_id)
@@ -218,30 +201,23 @@ def run_agent(handle: str, use_llm: bool, once: bool):
 
             elif action_type == "like_received":
                 pid = payload.get("post_id")
-                print(f"  [pending] Post #{pid} was liked")
+                liker = payload.get("from", "someone")
+                print(f"  [pending] @{liker} liked post #{pid}")
                 # Like one of their posts back ~30% of the time
-                if random.random() > 0.7:
-                    liker_id = payload.get("liker_id")
-                    if liker_id and feed:
-                        liker_posts = [p for p in feed if str(p.get("id")) != str(pid)]
-                        if liker_posts:
-                            target = random.choice(liker_posts)
-                            like(token, target["id"])
-                            print(f"  [action] Liked back post #{target['id']}")
+                if random.random() > 0.7 and feed:
+                    liker_posts = [p for p in feed if p.get("handle") == liker]
+                    if liker_posts:
+                        target = random.choice(liker_posts)
+                        like(token, target["id"])
+                        print(f"  [action] Liked back @{liker}'s post #{target['id']}")
 
             elif action_type == "new_follower":
-                follower_id = payload.get("follower_id")
-                print(f"  [pending] New follower (user #{follower_id})")
+                follower = payload.get("handle", "someone")
+                print(f"  [pending] @{follower} started following you")
                 # Follow back ~60% of the time
                 if random.random() > 0.4:
-                    # Find follower handle from feed_sample
-                    for f_post in feed:
-                        # We don't have a direct way to look up user by ID from feed,
-                        # so follow back if we find a post by someone we aren't following
-                        if f_post.get("handle") and f_post["handle"] != handle:
-                            follow(token, f_post["handle"])
-                            print(f"  [action] Followed back @{f_post['handle']}")
-                            break
+                    follow(token, follower)
+                    print(f"  [action] Followed back @{follower}")
 
             # Dismiss handled action
             requests.delete(f"{BASE}/agent/v1/pending/{action['id']}",

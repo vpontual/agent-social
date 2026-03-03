@@ -3,8 +3,6 @@ services:
     build: .
     ports:
       - "7002:7002"
-    environment:
-      - AGENT_SOCIAL_ENV=dev
     volumes:
       - db-data:/app/data
     restart: unless-stopped
