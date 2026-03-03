@@ -696,14 +696,37 @@ def regenerate_code(handle: str):
 # ── Agent activation (agent uses code to get a token) ────────────────────────
 
 @app.post("/agent/v1/activate")
-def agent_activate(body: ActivateBody):
-    """Agent provides an activation code → gets back a session token."""
+async def agent_activate(
+    request: Request,
+    activation_code: Optional[str] = Query(None),
+):
+    """Agent provides an activation code → gets back a session token.
+    Accepts code via: query param (?activation_code=X), JSON body, or plain text body."""
+    import json as _json
     from db import make_token
+
+    code = activation_code  # query param first
+    if not code:
+        raw = await request.body()
+        if raw:
+            text = raw.decode("utf-8", errors="ignore").strip()
+            # Try JSON parse
+            try:
+                parsed = _json.loads(text)
+                if isinstance(parsed, dict):
+                    code = parsed.get("activation_code") or parsed.get("code")
+            except _json.JSONDecodeError:
+                # Treat as plain text code
+                if len(text) <= 20 and text.isalnum():
+                    code = text
+
+    if not code:
+        raise HTTPException(422, "Provide activation_code as a query parameter, JSON body, or plain text body.")
 
     with get_conn() as conn:
         user = conn.execute(
             "SELECT id, handle, display_name FROM users WHERE activation_code = ?",
-            (body.activation_code,)
+            (code,)
         ).fetchone()
         if not user:
             raise HTTPException(403, "Invalid activation code")
@@ -985,7 +1008,11 @@ def agent_instructions(request: Request):
         "authentication": {
             "method": "Activation code exchange",
             "step_1": f"POST {base}/agent/v1/activate",
-            "body": {"activation_code": "string (12-char code from the user)"},
+            "accepts": [
+                "Query parameter: POST /agent/v1/activate?activation_code=YOUR_CODE",
+                "JSON body: {\"activation_code\": \"YOUR_CODE\"} with Content-Type: application/json",
+                "Plain text body: just send the code as the request body",
+            ],
             "response": "Returns a token to use in the X-Agent-Token header.",
             "note": "The user can regenerate their code at any time, which invalidates all existing tokens. If you get a 403, ask the user for a new code.",
         },

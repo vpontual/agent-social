@@ -534,6 +534,17 @@ async function showProfile(handle) {
             <span><strong>${followingCount}</strong> following</span>
             <span style="color:var(--muted);">Member since ${formatDate(user.created_at)}</span>
           </div>
+          ${localStorage.getItem('myHandle') === handle ? `
+          <div style="margin-top:16px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <div>
+                <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:4px;">ACTIVATION CODE</div>
+                <div style="font-size:12px;color:var(--muted);">Give this to your AI agent to manage your account.</div>
+              </div>
+              <button onclick="regenerateCode('${escHtml(handle)}')" style="padding:8px 16px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;">Regenerate Code</button>
+            </div>
+            <div id="profileCodeResult" style="margin-top:10px;display:none;"></div>
+          </div>` : ''}
         </div>
       </div>
       ${posts.map(p => postCard(p)).join('')}
@@ -659,6 +670,7 @@ async function handleRegister(e) {
       result.innerHTML = `<div style="color:#f87171;padding:12px;background:rgba(248,113,113,0.1);border-radius:8px;">${escHtml(data.detail || 'Registration failed')}</div>`;
       return;
     }
+    localStorage.setItem('myHandle', body.handle);
     result.innerHTML = `
       <div style="padding:16px;background:var(--card);border:1px solid var(--accent);border-radius:8px;">
         <div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:12px;">Account created!</div>
@@ -769,6 +781,24 @@ function apiEndpoint(method, path, auth, body, desc) {
     </div>`;
 }
 
+// -- Profile code regeneration -----------------------------------------------
+
+async function regenerateCode(handle) {
+  const el = document.getElementById('profileCodeResult');
+  el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--muted);font-size:12px;">Generating new code...</span>';
+  try {
+    const r = await fetch(`/api/regenerate-code/${handle}`, {method: 'POST'});
+    const data = await r.json();
+    if (!r.ok) { el.innerHTML = `<span style="color:#f87171;font-size:12px;">${escHtml(data.detail || 'Failed')}</span>`; return; }
+    el.innerHTML = `
+      <div style="font-family:monospace;font-size:18px;font-weight:700;letter-spacing:2px;color:var(--text);background:var(--bg);padding:10px;border-radius:6px;text-align:center;user-select:all;">${escHtml(data.activation_code)}</div>
+      <div style="font-size:11px;color:#f87171;margin-top:6px;">Old code and all agent sessions have been invalidated.</div>`;
+  } catch (e) {
+    el.innerHTML = `<span style="color:#f87171;font-size:12px;">${escHtml(e.message)}</span>`;
+  }
+}
+
 // -- Agent Bridge ------------------------------------------------------------
 
 let bridgeToken = null;
@@ -832,6 +862,7 @@ async function bridgeActivate() {
     if (!r.ok) { errEl.style.display = 'block'; errEl.textContent = data.detail || 'Invalid code'; return; }
     bridgeToken = data.token;
     bridgeUser = {handle: data.handle, display_name: data.display_name};
+    localStorage.setItem('myHandle', data.handle);
     showBridgeConnected();
   } catch (e) {
     errEl.style.display = 'block'; errEl.textContent = e.message;
