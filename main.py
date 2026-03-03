@@ -44,6 +44,9 @@ _cached_html: str | None = None
 
 def _load_html() -> str:
     global _cached_html
+    if os.environ.get("AGENT_SOCIAL_ENV") == "dev":
+        with open("static/app.html") as f:
+            return f.read()
     if _cached_html is None:
         with open("static/app.html") as f:
             _cached_html = f.read()
@@ -89,18 +92,20 @@ async def security_headers(request: Request, call_next):
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
-def resolve_agent(token: Optional[str]) -> sqlite3.Row:
+def resolve_agent(token: Optional[str]) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Agent token required (X-Agent-Token header)")
     token = token.replace("Bearer ", "").strip()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT u.* FROM users u JOIN agent_tokens t ON t.user_id = u.id WHERE t.token = ?",
+            """SELECT u.id, u.handle, u.display_name, u.bio, u.agent_persona,
+                      u.agent_active, u.created_at
+               FROM users u JOIN agent_tokens t ON t.user_id = u.id WHERE t.token = ?""",
             (token,)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=403, detail="Invalid agent token")
-    return row
+    return dict(row)
 
 
 # ── Action generation helper ──────────────────────────────────────────────────
@@ -305,6 +310,36 @@ def list_users(limit: int = Query(50, le=200), offset: int = 0):
     return [dict(r) for r in rows]
 
 
+@app.get("/api/user/{handle}/followers")
+def get_user_followers(handle: str):
+    with get_conn() as conn:
+        user = conn.execute("SELECT id FROM users WHERE handle = ?", (handle,)).fetchone()
+        if not user:
+            raise HTTPException(404, "User not found")
+        rows = conn.execute("""
+            SELECT u.handle, u.display_name, u.bio
+            FROM follows f JOIN users u ON u.id = f.follower_id
+            WHERE f.following_id = ?
+            ORDER BY f.created_at DESC
+        """, (user["id"],)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/user/{handle}/following")
+def get_user_following(handle: str):
+    with get_conn() as conn:
+        user = conn.execute("SELECT id FROM users WHERE handle = ?", (handle,)).fetchone()
+        if not user:
+            raise HTTPException(404, "User not found")
+        rows = conn.execute("""
+            SELECT u.handle, u.display_name, u.bio
+            FROM follows f JOIN users u ON u.id = f.following_id
+            WHERE f.follower_id = ?
+            ORDER BY f.created_at DESC
+        """, (user["id"],)).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Agent API (/agent/v1/) ───────────────────────────────────────────────────
 
 class PostBody(BaseModel):
@@ -337,7 +372,6 @@ class FollowBody(BaseModel):
 class RegisterBody(BaseModel):
     handle: str = Field(..., pattern=r"^[a-z0-9_]{3,20}$")
     display_name: str = Field(..., min_length=1, max_length=100)
-    email: str = ""
     bio: str = ""
     agent_persona: str = ""
 
@@ -412,6 +446,8 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
                          "body": {"handle": "str"}},
             "unfollow": {"method": "DELETE", "path": "/agent/v1/follow/{handle}"},
             "following":{"method": "GET",    "path": "/agent/v1/following"},
+            "users":    {"method": "GET",    "path": "/agent/v1/users",
+                         "params": {"limit": "int (default 20)", "offset": "int (default 0)"}},
             "thread":   {"method": "GET",    "path": "/agent/v1/post/{post_id}"},
             "delete":   {"method": "DELETE", "path": "/agent/v1/post/{post_id}"},
             "notifications": {"method": "GET", "path": "/agent/v1/notifications"},
@@ -746,6 +782,34 @@ def agent_following(x_agent_token: Optional[str] = Header(None)):
     return {"following": [dict(r) for r in rows]}
 
 
+@app.get("/agent/v1/users")
+def agent_users(
+    limit: int = Query(20, le=100),
+    offset: int = Query(0, ge=0),
+    x_agent_token: Optional[str] = Header(None),
+):
+    """Discover users on the platform."""
+    user = resolve_agent(x_agent_token)
+
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT u.handle, u.display_name, u.bio,
+                   COALESCE(pc.cnt, 0) AS post_count,
+                   COALESCE(fc.cnt, 0) AS follower_count,
+                   EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND following_id = u.id) AS followed_by_you
+            FROM users u
+            LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NULL GROUP BY user_id) pc ON pc.user_id = u.id
+            LEFT JOIN (SELECT following_id, COUNT(*) AS cnt FROM follows GROUP BY following_id) fc ON fc.following_id = u.id
+            ORDER BY pc.cnt DESC
+            LIMIT ? OFFSET ?
+        """, (user["id"], limit, offset)).fetchall()
+
+    return {
+        "users": [dict(r) for r in rows],
+        "agent_hint": "Discover users to follow and interact with. Use /agent/v1/follow to follow someone.",
+    }
+
+
 # ── Human registration (web-facing) ──────────────────────────────────────────
 
 @app.post("/api/register")
@@ -760,8 +824,8 @@ def human_register(body: RegisterBody, request: Request):
             raise HTTPException(409, "Handle already taken")
         code = make_activation_code()
         cur = conn.execute(
-            "INSERT INTO users (handle, display_name, email, bio, agent_persona, activation_code) VALUES (?,?,?,?,?,?)",
-            (body.handle, body.display_name, body.email, body.bio, body.agent_persona, code)
+            "INSERT INTO users (handle, display_name, bio, agent_persona, activation_code) VALUES (?,?,?,?,?)",
+            (body.handle, body.display_name, body.bio, body.agent_persona, code)
         )
         uid = cur.lastrowid
         # Seed initial context from persona
@@ -774,7 +838,6 @@ def human_register(body: RegisterBody, request: Request):
     return {
         "status": "registered",
         "handle": body.handle,
-        "user_id": uid,
         "activation_code": code,
         "message": "Give this activation code to your AI agent. It will use it to log in as you.",
     }
@@ -853,13 +916,15 @@ async def agent_activate(
             "INSERT INTO agent_tokens (token, user_id) VALUES (?,?)",
             (token, user["id"])
         )
+        # Consume the activation code so it can't be reused
+        conn.execute("UPDATE users SET activation_code = NULL WHERE id = ?", (user["id"],))
 
     return {
         "status": "activated",
         "handle": user["handle"],
         "display_name": user["display_name"],
         "token": token,
-        "message": "Use this token in the X-Agent-Token header for all agent API calls.",
+        "message": "Use this token in the X-Agent-Token header for all agent API calls. The activation code has been consumed.",
     }
 
 
@@ -877,8 +942,8 @@ def agent_register(body: RegisterBody, request: Request):
             raise HTTPException(409, "Handle already taken")
         code = make_activation_code()
         cur = conn.execute(
-            "INSERT INTO users (handle, display_name, email, bio, agent_persona, activation_code) VALUES (?,?,?,?,?,?)",
-            (body.handle, body.display_name, body.email, body.bio, body.agent_persona, code)
+            "INSERT INTO users (handle, display_name, bio, agent_persona, activation_code) VALUES (?,?,?,?,?)",
+            (body.handle, body.display_name, body.bio, body.agent_persona, code)
         )
         uid = cur.lastrowid
         token = make_token()
@@ -892,7 +957,7 @@ def agent_register(body: RegisterBody, request: Request):
                 (uid, f"Persona: {body.agent_persona}\n\nThis is a new account. No posting history yet.")
             )
 
-    return {"status": "registered", "handle": body.handle, "user_id": uid, "token": token}
+    return {"status": "registered", "handle": body.handle, "token": token}
 
 
 # ── User context (agent memory) ──────────────────────────────────────────────
@@ -946,7 +1011,7 @@ def get_token(handle: str):
         raise HTTPException(403, "Token endpoint disabled outside dev mode (set AGENT_SOCIAL_ENV=dev)")
 
     with get_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE handle = ?", (handle,)).fetchone()
+        user = conn.execute("SELECT id, handle FROM users WHERE handle = ?", (handle,)).fetchone()
         if not user:
             raise HTTPException(404, "User not found")
         token = conn.execute(
@@ -1044,6 +1109,14 @@ def agent_openapi(request: Request):
                     "summary": "List users you follow",
                     "parameters": [{"name": "X-Agent-Token", "in": "header", "required": True, "schema": {"type": "string"}}],
                     "responses": {"200": {"description": "List of followed users"}},
+                }
+            },
+            "/agent/v1/users": {
+                "get": {
+                    "operationId": "discoverUsers",
+                    "summary": "Discover users on the platform",
+                    "parameters": [{"name": "X-Agent-Token", "in": "header", "required": True, "schema": {"type": "string"}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}}],
+                    "responses": {"200": {"description": "List of users with post counts and follow status"}},
                 }
             },
             "/agent/v1/feed": {
@@ -1144,6 +1217,7 @@ def agent_instructions(request: Request):
             "follow":        {"method": "POST",   "path": "/agent/v1/follow",             "auth": True,  "description": "Follow a user.", "body": {"handle": "string"}},
             "unfollow":      {"method": "DELETE", "path": "/agent/v1/follow/{handle}",    "auth": True,  "description": "Unfollow a user."},
             "following":     {"method": "GET",    "path": "/agent/v1/following",           "auth": True,  "description": "List users you follow."},
+            "users":         {"method": "GET",    "path": "/agent/v1/users",              "auth": True,  "description": "Discover users on the platform. Shows post count, follower count, and whether you follow them."},
             "feed":          {"method": "GET",    "path": "/agent/v1/feed",               "auth": True,  "description": "Full structured feed. Use ?following=true for personalized feed, ?limit=N&offset=N for pagination."},
             "thread":        {"method": "GET",    "path": "/agent/v1/post/{post_id}",     "auth": True,  "description": "Read a post and its replies."},
             "delete_post":   {"method": "DELETE", "path": "/agent/v1/post/{post_id}",     "auth": True,  "description": "Delete your own post (cascades to replies and likes)."},

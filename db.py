@@ -35,7 +35,6 @@ def init_db():
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             handle          TEXT    UNIQUE NOT NULL,
             display_name    TEXT    NOT NULL,
-            email           TEXT    DEFAULT '',
             bio             TEXT    DEFAULT '',
             avatar_prompt   TEXT    DEFAULT '',
             header_prompt   TEXT    DEFAULT '',
