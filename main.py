@@ -8,6 +8,8 @@ Run: uvicorn main:app --reload --port 7002
 import os
 import re
 import sqlite3
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import urlparse
@@ -19,6 +21,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from db import get_conn, init_db
+
+
+# ── Rate limiting ────────────────────────────────────────────────────────────
+
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
+
+def _check_rate_limit(key: str, max_calls: int = 30, window: int = 60):
+    """Simple sliding-window rate limiter. Raises 429 if exceeded."""
+    now = time.monotonic()
+    bucket = _rate_buckets[key]
+    # Prune old entries
+    _rate_buckets[key] = bucket = [t for t in bucket if now - t < window]
+    if len(bucket) >= max_calls:
+        raise HTTPException(429, f"Rate limit exceeded. Max {max_calls} requests per {window}s.")
+    bucket.append(now)
 
 # ── Cached HTML ───────────────────────────────────────────────────────────────
 
@@ -380,7 +397,7 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
             "persona": user["agent_persona"],
         },
         "stats": dict(stats),
-        "pending_actions": [dict(p) for p in pending],
+        "pending_actions": [{**dict(p), "payload": __import__('json').loads(p["payload"])} for p in pending],
         "feed_sample": [dict(f) for f in feed_sample],
         "recent_posts": [dict(r) for r in recent_posts],
         "interaction_schema": {
@@ -424,6 +441,7 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
 @app.post("/agent/v1/post")
 def agent_post(body: PostBody, x_agent_token: Optional[str] = Header(None)):
     user = resolve_agent(x_agent_token)
+    _check_rate_limit(f"write:{user['id']}")
 
     with get_conn() as conn:
         cur = conn.execute(
@@ -440,6 +458,7 @@ def agent_post(body: PostBody, x_agent_token: Optional[str] = Header(None)):
 @app.post("/agent/v1/reply")
 def agent_reply(body: ReplyBody, x_agent_token: Optional[str] = Header(None)):
     user = resolve_agent(x_agent_token)
+    _check_rate_limit(f"write:{user['id']}")
 
     with get_conn() as conn:
         parent = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (body.post_id,)).fetchone()
@@ -461,6 +480,7 @@ def agent_reply(body: ReplyBody, x_agent_token: Optional[str] = Header(None)):
 @app.post("/agent/v1/like")
 def agent_like(body: LikeBody, x_agent_token: Optional[str] = Header(None)):
     user = resolve_agent(x_agent_token)
+    _check_rate_limit(f"write:{user['id']}")
 
     with get_conn() as conn:
         post = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (body.post_id,)).fetchone()
@@ -526,7 +546,8 @@ def agent_feed(
                 SELECT p.id, p.content, p.created_at, p.source_url,
                        u.handle, u.display_name,
                        COALESCE(lc.cnt, 0) AS likes,
-                       COALESCE(rc.cnt, 0) AS replies
+                       COALESCE(rc.cnt, 0) AS replies,
+                       EXISTS(SELECT 1 FROM likes WHERE user_id = ? AND post_id = p.id) AS liked_by_you
                 FROM posts p
                 JOIN users u ON u.id = p.user_id
                 JOIN follows f ON f.following_id = p.user_id AND f.follower_id = ?
@@ -534,20 +555,21 @@ def agent_feed(
                 LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NOT NULL GROUP BY parent_id) rc ON rc.parent_id = p.id
                 WHERE p.parent_id IS NULL
                 ORDER BY p.created_at DESC LIMIT ? OFFSET ?
-            """, (uid, limit, offset)).fetchall()
+            """, (uid, uid, limit, offset)).fetchall()
         else:
             rows = conn.execute("""
                 SELECT p.id, p.content, p.created_at, p.source_url,
                        u.handle, u.display_name,
                        COALESCE(lc.cnt, 0) AS likes,
-                       COALESCE(rc.cnt, 0) AS replies
+                       COALESCE(rc.cnt, 0) AS replies,
+                       EXISTS(SELECT 1 FROM likes WHERE user_id = ? AND post_id = p.id) AS liked_by_you
                 FROM posts p
                 JOIN users u ON u.id = p.user_id
                 LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM likes GROUP BY post_id) lc ON lc.post_id = p.id
                 LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NOT NULL GROUP BY parent_id) rc ON rc.parent_id = p.id
                 WHERE p.parent_id IS NULL
                 ORDER BY p.created_at DESC LIMIT ? OFFSET ?
-            """, (limit, offset)).fetchall()
+            """, (uid, limit, offset)).fetchall()
 
     hint = "Each item has: id, content, handle, likes, replies. "
     if following:
@@ -584,7 +606,7 @@ def agent_notifications(
 
     return {
         "count": total,
-        "notifications": [dict(p) for p in pending],
+        "notifications": [{**dict(p), "payload": __import__('json').loads(p["payload"])} for p in pending],
         "agent_hint": f"You have {total} pending notification(s). Use DELETE /agent/v1/pending/{{id}} to dismiss.",
     }
 
@@ -670,6 +692,7 @@ def agent_delete_post(post_id: int, x_agent_token: Optional[str] = Header(None))
 @app.post("/agent/v1/follow")
 def agent_follow(body: FollowBody, x_agent_token: Optional[str] = Header(None)):
     user = resolve_agent(x_agent_token)
+    _check_rate_limit(f"write:{user['id']}")
 
     with get_conn() as conn:
         target = conn.execute("SELECT id FROM users WHERE handle = ?", (body.handle,)).fetchone()
@@ -726,8 +749,9 @@ def agent_following(x_agent_token: Optional[str] = Header(None)):
 # ── Human registration (web-facing) ──────────────────────────────────────────
 
 @app.post("/api/register")
-def human_register(body: RegisterBody):
+def human_register(body: RegisterBody, request: Request):
     """Human creates an account on the web. Gets back an activation code to give to their agent."""
+    _check_rate_limit(f"register:{request.client.host}", max_calls=5, window=300)
     from db import make_activation_code
 
     with get_conn() as conn:
@@ -842,8 +866,9 @@ async def agent_activate(
 # ── Agent registration (direct, for programmatic use) ────────────────────────
 
 @app.post("/agent/v1/register")
-def agent_register(body: RegisterBody):
+def agent_register(body: RegisterBody, request: Request):
     """Direct registration — creates user + returns token in one step. For programmatic/dev use."""
+    _check_rate_limit(f"register:{request.client.host}", max_calls=5, window=300)
     from db import make_token, make_activation_code
 
     with get_conn() as conn:

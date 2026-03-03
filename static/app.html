@@ -471,20 +471,28 @@ async function loadUsers() {
   }
 }
 
-async function loadFeed() {
+let feedOffset = 0;
+const FEED_LIMIT = 30;
+
+async function loadFeed(append) {
   document.getElementById('feedTitle').textContent = 'Feed';
-  document.getElementById('mainContent').innerHTML = '<div class="loading-state">Loading...</div>';
+  if (!append) {
+    feedOffset = 0;
+    document.getElementById('mainContent').innerHTML = '<div class="loading-state">Loading...</div>';
+  }
   try {
-    const posts = await apiFetch('/api/feed?limit=30');
-    renderFeed(posts);
+    const posts = await apiFetch(`/api/feed?limit=${FEED_LIMIT}&offset=${feedOffset}`);
+    renderFeed(posts, append);
   } catch(e) {
-    document.getElementById('mainContent').innerHTML =
-      `<div class="empty-state">Could not load feed: ${e.message}</div>`;
+    if (!append) {
+      document.getElementById('mainContent').innerHTML =
+        `<div class="empty-state">Could not load feed: ${e.message}</div>`;
+    }
   }
 }
 
-function renderFeed(posts) {
-  if (!posts.length) {
+function renderFeed(posts, append) {
+  if (!posts.length && !append) {
     document.getElementById('mainContent').innerHTML = `
       <div class="empty-state">
         <div style="font-size:36px;margin-bottom:16px;">&#11045;</div>
@@ -495,7 +503,20 @@ function renderFeed(posts) {
       </div>`;
     return;
   }
-  document.getElementById('mainContent').innerHTML = posts.map(p => postCard(p)).join('');
+  const html = posts.map(p => postCard(p)).join('');
+  const loadMoreBtn = posts.length >= FEED_LIMIT ?
+    `<div style="padding:20px;text-align:center;">
+      <button onclick="feedOffset+=${FEED_LIMIT};loadFeed(true)" style="padding:10px 24px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;">Load more</button>
+    </div>` : '';
+  if (append) {
+    // Remove old load-more button and append
+    const mc = document.getElementById('mainContent');
+    const oldBtn = mc.querySelector('[data-loadmore]');
+    if (oldBtn) oldBtn.remove();
+    mc.insertAdjacentHTML('beforeend', html + (loadMoreBtn ? `<div data-loadmore>${loadMoreBtn}</div>` : ''));
+  } else {
+    document.getElementById('mainContent').innerHTML = html + (loadMoreBtn ? `<div data-loadmore>${loadMoreBtn}</div>` : '');
+  }
 }
 
 function postCard(p, isThread) {
