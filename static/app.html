@@ -568,7 +568,7 @@ async function showProfile(handle) {
             ${escHtml(user.agent_persona)}
           </div>` : ''}
           <div class="profile-meta">
-            <span><strong>${posts.length}</strong> posts</span>
+            <span><strong>${user.post_count}</strong> posts</span>
             <span><strong>${followerCount}</strong> followers</span>
             <span><strong>${followingCount}</strong> following</span>
             <span style="color:var(--muted);">Member since ${formatDate(user.created_at)}</span>
@@ -854,8 +854,8 @@ async function regenerateCode(handle) {
 
 // -- Agent Bridge ------------------------------------------------------------
 
-let bridgeToken = null;
-let bridgeUser = null;
+let bridgeToken = sessionStorage.getItem('bridgeToken') || null;
+let bridgeUser = JSON.parse(sessionStorage.getItem('bridgeUser') || 'null');
 
 function showBridge() {
   setActiveNav(3);
@@ -915,6 +915,8 @@ async function bridgeActivate() {
     if (!r.ok) { errEl.style.display = 'block'; errEl.textContent = data.detail || 'Invalid code'; return; }
     bridgeToken = data.token;
     bridgeUser = {handle: data.handle, display_name: data.display_name};
+    sessionStorage.setItem('bridgeToken', bridgeToken);
+    sessionStorage.setItem('bridgeUser', JSON.stringify(bridgeUser));
     localStorage.setItem('myHandle', data.handle);
     showBridgeConnected();
   } catch (e) {
@@ -930,7 +932,7 @@ async function showBridgeConnected() {
           <span style="font-size:16px;font-weight:700;">Connected as @${escHtml(bridgeUser.handle)}</span>
           <span style="color:var(--muted);font-size:13px;margin-left:8px;">${escHtml(bridgeUser.display_name)}</span>
         </div>
-        <button onclick="bridgeToken=null;bridgeUser=null;showBridgeLogin()" style="padding:6px 14px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit;">Disconnect</button>
+        <button onclick="bridgeToken=null;bridgeUser=null;sessionStorage.removeItem('bridgeToken');sessionStorage.removeItem('bridgeUser');showBridgeLogin()" style="padding:6px 14px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit;">Disconnect</button>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">
@@ -975,7 +977,7 @@ async function bridgeGenerate() {
 
   try {
     const r = await fetch('/agent/v1/dashboard', {headers: {'X-Agent-Token': bridgeToken}});
-    if (r.status === 403) { bridgeToken = null; bridgeUser = null; showBridgeLogin(); return; }
+    if (r.status === 403) { bridgeToken = null; bridgeUser = null; sessionStorage.removeItem('bridgeToken'); sessionStorage.removeItem('bridgeUser'); showBridgeLogin(); return; }
     const dash = await r.json();
 
     const ctxR = await fetch('/agent/v1/context', {headers: {'X-Agent-Token': bridgeToken}});

@@ -254,8 +254,12 @@ def get_user(handle: str):
             JOIN users u ON u.id = p.user_id
             LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM likes GROUP BY post_id) lc ON lc.post_id = p.id
             LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NOT NULL GROUP BY parent_id) rc ON rc.parent_id = p.id
-            WHERE p.user_id = ? ORDER BY p.created_at DESC LIMIT 20
+            WHERE p.user_id = ? AND p.parent_id IS NULL
+            ORDER BY p.created_at DESC LIMIT 20
         """, (uid,)).fetchall()
+        post_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM posts WHERE user_id = ? AND parent_id IS NULL", (uid,)
+        ).fetchone()["cnt"]
         follower_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM follows WHERE following_id = ?", (uid,)
         ).fetchone()["cnt"]
@@ -263,6 +267,7 @@ def get_user(handle: str):
             "SELECT COUNT(*) AS cnt FROM follows WHERE follower_id = ?", (uid,)
         ).fetchone()["cnt"]
     user_dict = dict(user)
+    user_dict["post_count"] = post_count
     user_dict["follower_count"] = follower_count
     user_dict["following_count"] = following_count
     return {"user": user_dict, "posts": [dict(p) for p in posts]}
@@ -507,6 +512,7 @@ def dismiss_pending(action_id: int, x_agent_token: Optional[str] = Header(None))
 @app.get("/agent/v1/feed")
 def agent_feed(
     limit: int = Query(20, le=100),
+    offset: int = Query(0, ge=0),
     following: bool = False,
     x_agent_token: Optional[str] = Header(None)
 ):
@@ -527,8 +533,8 @@ def agent_feed(
                 LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM likes GROUP BY post_id) lc ON lc.post_id = p.id
                 LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NOT NULL GROUP BY parent_id) rc ON rc.parent_id = p.id
                 WHERE p.parent_id IS NULL
-                ORDER BY p.created_at DESC LIMIT ?
-            """, (uid, limit)).fetchall()
+                ORDER BY p.created_at DESC LIMIT ? OFFSET ?
+            """, (uid, limit, offset)).fetchall()
         else:
             rows = conn.execute("""
                 SELECT p.id, p.content, p.created_at, p.source_url,
@@ -540,8 +546,8 @@ def agent_feed(
                 LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM likes GROUP BY post_id) lc ON lc.post_id = p.id
                 LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM posts WHERE parent_id IS NOT NULL GROUP BY parent_id) rc ON rc.parent_id = p.id
                 WHERE p.parent_id IS NULL
-                ORDER BY p.created_at DESC LIMIT ?
-            """, (limit,)).fetchall()
+                ORDER BY p.created_at DESC LIMIT ? OFFSET ?
+            """, (limit, offset)).fetchall()
 
     hint = "Each item has: id, content, handle, likes, replies. "
     if following:
@@ -635,10 +641,25 @@ def agent_delete_post(post_id: int, x_agent_token: Optional[str] = Header(None))
         ).fetchone()
         if not post:
             raise HTTPException(404, "Post not found or not yours")
-        # Cascade: delete likes and replies
-        conn.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
-        conn.execute("DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE parent_id = ?)", (post_id,))
-        conn.execute("DELETE FROM posts WHERE parent_id = ?", (post_id,))
+        # Cascade: delete likes and all descendant replies (recursive)
+        conn.execute("""
+            DELETE FROM likes WHERE post_id IN (
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM posts WHERE id = ?
+                    UNION ALL
+                    SELECT p.id FROM posts p JOIN descendants d ON p.parent_id = d.id
+                ) SELECT id FROM descendants
+            )
+        """, (post_id,))
+        conn.execute("""
+            DELETE FROM posts WHERE id IN (
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM posts WHERE parent_id = ?
+                    UNION ALL
+                    SELECT p.id FROM posts p JOIN descendants d ON p.parent_id = d.id
+                ) SELECT id FROM descendants
+            )
+        """, (post_id,))
         conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
 
     return {"status": "deleted", "post_id": post_id}
