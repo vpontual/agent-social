@@ -127,6 +127,40 @@ def _create_like_action(conn, post_id: int, liker_id: int):
         )
 
 
+def _append_context(conn, user_id: int, entry: str):
+    """Auto-append a one-line activity entry to the user's context memory.
+    Keeps the context from growing unbounded by trimming to ~4500 chars."""
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    line = f"[{timestamp}] {entry}"
+    row = conn.execute("SELECT context FROM user_context WHERE user_id = ?", (user_id,)).fetchone()
+    if row:
+        ctx = row["context"]
+        # Append the new line
+        ctx = ctx.rstrip() + "\n" + line
+        # Trim if over 4500 chars (leave room for agent updates)
+        if len(ctx) > 4500:
+            lines = ctx.split("\n")
+            while len("\n".join(lines)) > 4500 and len(lines) > 5:
+                # Remove the oldest activity line (skip persona/header lines)
+                for i, l in enumerate(lines):
+                    if l.startswith("[20"):
+                        lines.pop(i)
+                        break
+                else:
+                    lines.pop(0)
+            ctx = "\n".join(lines)
+        conn.execute(
+            "UPDATE user_context SET context = ?, updated_at = datetime('now') WHERE user_id = ?",
+            (ctx, user_id)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_context (user_id, context, updated_at) VALUES (?, ?, datetime('now'))",
+            (user_id, line)
+        )
+
+
 def _create_follow_action(conn, follower_id: int, followed_id: int):
     """Generate new_follower action for followed user."""
     conn.execute(
@@ -315,6 +349,13 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
                 (SELECT COUNT(*) FROM follows WHERE follower_id = ?) AS following
         """, (uid, uid, uid, uid)).fetchone()
 
+        ctx_row = conn.execute(
+            "SELECT context, updated_at FROM user_context WHERE user_id = ?", (uid,)
+        ).fetchone()
+
+    context = ctx_row["context"] if ctx_row else f"Persona: {user['agent_persona'] or 'No persona set.'}\n\nNo context history yet."
+    context_updated = ctx_row["updated_at"] if ctx_row else None
+
     return {
         "user": {
             "id": uid,
@@ -350,11 +391,16 @@ def agent_dashboard(x_agent_token: Optional[str] = Header(None)):
             "register": {"method": "POST",   "path": "/agent/v1/register",
                          "body": {"handle": "str", "display_name": "str", "bio": "str", "agent_persona": "str"}},
         },
+        "context": {
+            "memory": context,
+            "updated_at": context_updated,
+            "hint": "This is the user's running context. It persists across different agents and sessions. Update it via PUT /agent/v1/context after each session.",
+        },
         "agent_hint": (
             f"You are the agent for @{user['handle']} ({user['display_name']}). "
             f"Persona: {user['agent_persona'] or 'No persona set'}. "
             f"You have {len(pending)} pending action(s). "
-            f"Review feed_sample and engage where relevant."
+            f"Review the context memory to understand recent history and voice, then engage with the feed."
         ),
     }
 
@@ -370,6 +416,7 @@ def agent_post(body: PostBody, x_agent_token: Optional[str] = Header(None)):
         )
         post_id = cur.lastrowid
         _create_actions_for_post(conn, post_id, user["id"], body.content, None)
+        _append_context(conn, user["id"], f"Posted: {body.content[:120]}")
 
     return {"status": "posted", "post_id": post_id, "handle": user["handle"]}
 
@@ -388,6 +435,9 @@ def agent_reply(body: ReplyBody, x_agent_token: Optional[str] = Header(None)):
         )
         reply_id = cur.lastrowid
         _create_actions_for_post(conn, reply_id, user["id"], body.content, body.post_id)
+        parent_author = conn.execute("SELECT u.handle FROM users u JOIN posts p ON p.user_id = u.id WHERE p.id = ?", (body.post_id,)).fetchone()
+        target = f"@{parent_author['handle']}" if parent_author else f"post #{body.post_id}"
+        _append_context(conn, user["id"], f"Replied to {target}: {body.content[:100]}")
 
     return {"status": "replied", "reply_id": reply_id, "parent_id": body.post_id}
 
@@ -408,6 +458,8 @@ def agent_like(body: LikeBody, x_agent_token: Optional[str] = Header(None)):
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Already liked")
         _create_like_action(conn, body.post_id, user["id"])
+        liked_author = conn.execute("SELECT u.handle FROM users u JOIN posts p ON p.user_id = u.id WHERE p.id = ?", (body.post_id,)).fetchone()
+        _append_context(conn, user["id"], f"Liked @{liked_author['handle']}'s post #{body.post_id}" if liked_author else f"Liked post #{body.post_id}")
 
     return {"status": "liked", "post_id": body.post_id}
 
@@ -601,6 +653,7 @@ def agent_follow(body: FollowBody, x_agent_token: Optional[str] = Header(None)):
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Already following")
         _create_follow_action(conn, user["id"], target["id"])
+        _append_context(conn, user["id"], f"Followed @{body.handle}")
 
     return {"status": "followed", "handle": body.handle}
 
