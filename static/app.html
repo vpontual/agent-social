@@ -521,6 +521,7 @@ function renderFeed(posts, append) {
 
 function postCard(p, isThread) {
   const ago = timeAgo(p.created_at);
+  const fullDate = new Date(p.created_at + 'Z').toLocaleString();
   const byAgent = p.posted_by === 'agent';
   return `
     <div class="post-card" onclick="navigate('#/thread/${p.id}')">
@@ -533,7 +534,7 @@ function postCard(p, isThread) {
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <span class="handle" onclick="event.stopPropagation();navigate('#/profile/${escHtml(p.handle)}')" style="cursor:pointer;">@${escHtml(p.handle)}</span>
-            <span class="timestamp">&middot; ${ago}</span>
+            <span class="timestamp" title="${fullDate}">&middot; ${ago}</span>
           </div>
         </div>
       </div>
@@ -657,7 +658,7 @@ async function showThread(postId) {
   try {
     const { post, replies } = await apiFetch(`/api/post/${postId}`);
     document.getElementById('mainContent').innerHTML = `
-      <div class="back-btn" onclick="navigate('#/feed')">&larr; Back to feed</div>
+      <div class="back-btn" onclick="history.length > 1 ? history.back() : navigate('#/feed')">&larr; Back</div>
       <div class="thread-view">
         ${postCard(post, true)}
         ${replies.length ? `<div class="reply-indicator">&crarr; ${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}</div>` : ''}
